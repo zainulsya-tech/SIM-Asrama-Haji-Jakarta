@@ -1,5 +1,5 @@
 {
-  "buildCommand": "vite build",
+  "buildCommand": "vite build && esbuild server.ts --bundle --platform=node --target=node20 --format=esm --outfile=api/index.js --external:pg-native --external:vite",
   "outputDirectory": "dist",
   "framework": "vite",
   "headers": [
@@ -19,6 +19,10 @@
     }
   ],
   "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index.js"
+    },
     {
       "source": "/(.*)",
       "destination": "/index.html"

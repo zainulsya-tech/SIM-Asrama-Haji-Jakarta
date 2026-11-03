@@ -1,4 +1,4 @@
-import dotenv from 'dotenv';
+﻿import dotenv from 'dotenv';
 dotenv.config();
 
 import express from "express";
@@ -2068,7 +2068,7 @@ async function startServer() {
           logoutTime: resolvedLogoutTime,
           durationSeconds: diffSec,
           durationFormatted: formatted,
-          notes: s.notes ? `${s.notes} • Auto check-out saat tab/browser ditutup` : "Auto check-out saat tab/browser ditutup",
+          notes: s.notes ? `${s.notes} Ã¢â‚¬Â¢ Auto check-out saat tab/browser ditutup` : "Auto check-out saat tab/browser ditutup",
         };
         return updatedSession;
       }
@@ -2138,7 +2138,7 @@ async function startServer() {
               ...s,
               status: "SELESAI",
               logoutTime: payload.loginTime || new Date().toISOString().replace("T", " ").substring(0, 19),
-              notes: s.notes ? `${s.notes} • Dialihkan karena login di perangkat baru` : "Dialihkan karena login di perangkat baru",
+              notes: s.notes ? `${s.notes} Ã¢â‚¬Â¢ Dialihkan karena login di perangkat baru` : "Dialihkan karena login di perangkat baru",
             };
           }
           return s;
@@ -3594,18 +3594,34 @@ async function startServer() {
     if (!databaseUrl || typeof databaseUrl !== 'string') {
       return res.status(400).json({ success: false, error: "Database URL tidak valid" });
     }
+    const TIMEOUT_MS = 8000;
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Koneksi timeout setelah ${TIMEOUT_MS / 1000} detik. Periksa URL dan pastikan database Aiven aktif.`)), TIMEOUT_MS)
+    );
     try {
       relationalSchemaInitialized = false;
       updatePoolConfig(databaseUrl.trim());
       try {
         fs.writeFileSync(aivenConfigFilePath, JSON.stringify({ databaseUrl: databaseUrl.trim(), updatedAt: new Date().toISOString() }, null, 2), "utf-8");
       } catch (_) {}
-      await ensureRelationalSchema(true);
-      const { rows } = await pgQuery("SELECT NOW() as now");
-      res.json({ success: true, message: "Koneksi Aiven PostgreSQL berhasil dikonfigurasi!", time: rows[0]?.now });
+      const result = await Promise.race([
+        (async () => {
+          await ensureRelationalSchema(true);
+          const { rows } = await pgQuery("SELECT NOW() as now");
+          return rows[0]?.now;
+        })(),
+        timeoutPromise
+      ]);
+      const timeVal = result;
+      if (!res.headersSent) {
+        res.json({ success: true, message: "Koneksi Aiven PostgreSQL berhasil dikonfigurasi!", time: timeVal instanceof Date ? timeVal.toISOString() : String(timeVal || new Date().toISOString()) });
+      }
     } catch (err: any) {
       console.error("Configure Aiven error:", err?.message || err);
-      res.status(500).json({ success: false, error: err?.message || "Gagal menghubungkan database dengan URL tersebut" });
+      const errMsg = typeof err === 'string' ? err : (err?.message || JSON.stringify(err) || "Gagal menghubungkan database dengan URL tersebut");
+      if (!res.headersSent) {
+        res.status(500).json({ success: false, error: errMsg });
+      }
     }
   });
 
@@ -3613,13 +3629,28 @@ async function startServer() {
     if (!process.env.DATABASE_URL) {
       return res.status(400).json({ success: false, error: "DATABASE_URL belum dikonfigurasi." });
     }
+    const TIMEOUT_MS = 8000;
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Koneksi timeout setelah ${TIMEOUT_MS / 1000} detik. Periksa URL dan pastikan database Aiven aktif.`)), TIMEOUT_MS)
+    );
     try {
-      await ensureAppKvTable();
-      const { rows } = await pgQuery("SELECT NOW() as now");
-      res.json({ success: true, message: "Koneksi ke Aiven PostgreSQL berhasil!", time: rows[0]?.now });
+      const timeVal = await Promise.race([
+        (async () => {
+          await ensureAppKvTable();
+          const { rows } = await pgQuery("SELECT NOW() as now");
+          return rows[0]?.now;
+        })(),
+        timeoutPromise
+      ]);
+      if (!res.headersSent) {
+        res.json({ success: true, message: "Koneksi ke Aiven PostgreSQL berhasil!", time: timeVal instanceof Date ? timeVal.toISOString() : String(timeVal || new Date().toISOString()) });
+      }
     } catch (err: any) {
       console.error("Test Aiven error:", err?.message || err);
-      res.status(500).json({ success: false, error: err?.message || "Koneksi database gagal" });
+      const errMsg = typeof err === 'string' ? err : (err?.message || JSON.stringify(err) || "Koneksi database gagal");
+      if (!res.headersSent) {
+        res.status(500).json({ success: false, error: errMsg });
+      }
     }
   });
 
@@ -3859,7 +3890,8 @@ async function startServer() {
 
   const shouldServeStatic = isStartOrProd && fs.existsSync(distIndex);
 
-  if (!shouldServeStatic) {
+  const isVercelRuntime = process.env.VERCEL === '1' || !!process.env.VERCEL_URL;
+  if (!shouldServeStatic && !isVercelRuntime) {
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: {
@@ -3871,7 +3903,7 @@ async function startServer() {
       appType: "spa",
     });
     app.use(vite.middlewares);
-  } else {
+  } else if (shouldServeStatic) {
     app.use(express.static(distPath, { index: false }));
     app.get("*", (req, res, next) => {
       if (fs.existsSync(distIndex)) {
@@ -3900,9 +3932,28 @@ async function startServer() {
     }
   });
 
-  httpServer.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
+
+  const isVercel = process.env.VERCEL === '1' || !!process.env.VERCEL_URL;
+  if (!isVercel) {
+    httpServer.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on http://localhost:${PORT}`);
+    });
+  }
+
+  return app;
 }
 
-startServer();
+// Jalankan server lokal hanya jika bukan di Vercel
+if (process.env.VERCEL !== '1' && !process.env.VERCEL_URL) {
+  startServer();
+}
+
+// Vercel Serverless: lazy-init app dan ekspor sebagai handler
+let _cachedVercelApp: any = null;
+
+export default async function handler(req: any, res: any) {
+  if (!_cachedVercelApp) {
+    _cachedVercelApp = await startServer();
+  }
+  return _cachedVercelApp(req, res);
+}
